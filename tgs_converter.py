@@ -1,6 +1,5 @@
 import os
 import sys
-import asyncio
 from pathlib import Path
 
 
@@ -37,24 +36,22 @@ GRAY   = "\033[90m"
 WHITE  = "\033[97m"
 
 
-def clr(text, color):
-    return f"{color}{text}{RESET}"
-
-def ok(msg):    print(clr(f"  [OK] {msg}", GREEN))
-def err(msg):   print(clr(f"  [!!] {msg}", RED))
-def info(msg):  print(clr(f"  --> {msg}", CYAN))
-def step(n, msg): print(f"\n{clr(f'[{n}]', YELLOW)} {WHITE}{msg}{RESET}")
-def hr(): print(clr("  " + "-" * 50, GRAY))
+def clr(text, color):   return f"{color}{text}{RESET}"
+def ok(msg):            print(clr(f"  [OK] {msg}", GREEN))
+def err(msg):           print(clr(f"  [!!] {msg}", RED))
+def info(msg):          print(clr(f"  --> {msg}", CYAN))
+def step(n, msg):       print(f"\n{clr(f'[{n}]', YELLOW)} {WHITE}{msg}{RESET}")
+def hr():               print(clr("  " + "-" * 50, GRAY))
 
 def header():
     print()
     print(clr("=" * 52, CYAN))
-    print(clr("  TGS -> GIF / WebP Converter  (rlottie-python)", BOLD))
+    print(clr("  TGS -> GIF / WebP Converter  v3", BOLD))
     print(clr("=" * 52, CYAN))
 
 def fmt_size(n_bytes):
-    if n_bytes < 1024: return f"{n_bytes} B"
-    if n_bytes < 1024**2: return f"{n_bytes/1024:.1f} KB"
+    if n_bytes < 1024:      return f"{n_bytes} B"
+    if n_bytes < 1024**2:   return f"{n_bytes/1024:.1f} KB"
     return f"{n_bytes/1024**2:.2f} MB"
 
 def prompt(msg, default=""):
@@ -101,22 +98,56 @@ def prompt_choice(msg, choices, default):
         err(f"Chon mot trong: {opts}")
 
 
-def get_frames(tgs_path: Path, width: int, height: int):
-    """Render TGS ra list Pillow RGBA Images."""
+def get_frames(tgs_path: Path, width: int, height: int, target_fps: int):
+    """
+    Render TGS ra frames va tinh duration chinh xac.
+
+    KEY FIX:
+      - Lay source_fps TU FILE GOC (khong dung fps nguoi dung nhap de tinh duration).
+      - target_fps chi dung de SKIP FRAME neu muon giam so frame.
+      - duration_ms luon tinh dua tren so frame thuc su output.
+
+    Vi sao file goc bi nhanh hon:
+      Code cu: duration = 1000 / target_fps (vi du 20fps => 50ms/frame)
+               nhung render du 60 frames => tong thoi gian = 60 * 50ms = 3000ms (sai)
+      Code moi: lay source_fps = 60, duration = 1000/60 = 16ms/frame
+               render du 60 frames => tong = 60 * 16ms = 1000ms (dung)
+    """
     anim = LottieAnimation.from_tgs(str(tgs_path))
-    frame_count = anim.lottie_animation_get_totalframe()
+    total_frames = anim.lottie_animation_get_totalframe()
+    source_fps   = anim.lottie_animation_get_framerate()
+
+    if source_fps <= 0:
+        source_fps = 60.0
+
+    if target_fps <= 0 or target_fps >= source_fps:
+        # Giu nguyen toan bo frame, duration theo FPS goc
+        duration_ms = int(round(1000.0 / source_fps))
+        frame_indices = list(range(0, total_frames))
+    else:
+        # Skip frame de dat target_fps
+        skip = int(round(source_fps / target_fps))
+        skip = max(1, skip)
+        # Duration tinh theo so frame thuc su (source_fps / skip)
+        actual_fps = source_fps / skip
+        duration_ms = int(round(1000.0 / actual_fps))
+        frame_indices = list(range(0, total_frames, skip))
+
+    # GIF toi thieu 20ms/frame (gioi han cua dinh dang GIF)
+    duration_ms = max(duration_ms, 20)
+
     frames = []
-    for i in range(frame_count):
+    for i in frame_indices:
         frame = anim.render_pillow_frame(i, width=width, height=height)
         frames.append(frame)
+
     anim.lottie_animation_destroy()
-    return frames
+    return frames, duration_ms, round(source_fps)
 
 
-def save_gif(frames, out_path: Path, fps: int):
+def save_gif(frames, out_path: Path, duration_ms: int):
     if not frames:
         raise ValueError("Khong co frames")
-    duration_ms = int(1000 / fps)
     frames[0].save(
         out_path,
         format="GIF",
@@ -128,10 +159,9 @@ def save_gif(frames, out_path: Path, fps: int):
     )
 
 
-def save_webp(frames, out_path: Path, fps: int, quality: int = 85):
+def save_webp(frames, out_path: Path, duration_ms: int, quality: int = 85):
     if not frames:
         raise ValueError("Khong co frames")
-    duration_ms = int(1000 / fps)
     frames[0].save(
         out_path,
         format="WEBP",
@@ -144,23 +174,24 @@ def save_webp(frames, out_path: Path, fps: int, quality: int = 85):
     )
 
 
-def convert_one(tgs_path: Path, out_path: Path, size: int, fps: int, fmt: str, quality: int = 85):
+def convert_one(tgs_path: Path, out_path: Path, size: int, target_fps: int, fmt: str, quality: int = 85):
     try:
-        frames = get_frames(tgs_path, size, size)
+        frames, duration_ms, source_fps = get_frames(tgs_path, size, size, target_fps)
         if not frames:
-            return False
+            return False, 0, 0
         if fmt == "GIF":
-            save_gif(frames, out_path, fps)
+            save_gif(frames, out_path, duration_ms)
         else:
-            save_webp(frames, out_path, fps, quality)
-        return out_path.exists() and out_path.stat().st_size > 0
+            save_webp(frames, out_path, duration_ms, quality)
+        ok_flag = out_path.exists() and out_path.stat().st_size > 0
+        return ok_flag, source_fps, duration_ms
     except Exception as e:
         err(f"Loi: {e}")
-        return False
+        return False, 0, 0
 
 
 def main():
-    os.system("")  # bat ANSI Windows
+    os.system("")
     header()
 
     step(1, "Thu muc chua file .tgs:")
@@ -184,10 +215,14 @@ def main():
         out_size += 1
     ok(f"Kich thuoc output: {out_size}x{out_size} px")
 
-    step(4, "Frame rate (FPS):")
-    default_fps = 50 if fmt == "GIF" else 60
-    fps = prompt_int("FPS", default_fps, 1, 120)
-    ok(f"FPS: {fps}")
+    step(4, "Giam FPS? (0 = giu nguyen FPS goc cua tung file):")
+    info("Vi du: file goc 60fps, nhap 20 => chi lay 1/3 so frame, toc do van dung")
+    info("Khuyen nghi: nhap 0 de dam bao toc do chinh xac nhat")
+    target_fps = prompt_int("Target FPS (0 = goc)", 0, 0, 120)
+    if target_fps == 0:
+        ok("Se giu nguyen FPS goc cua tung file")
+    else:
+        ok(f"Target FPS: {target_fps} (se skip frame neu file goc cao hon)")
 
     quality = 85
     if fmt == "WEBP":
@@ -202,11 +237,12 @@ def main():
     print("     [2] Nhap duong dan tuy chinh")
     ch = prompt_choice("Lua chon", ["1", "2"], "1")
 
+    fps_label = f"{target_fps}fps" if target_fps > 0 else "srcfps"
     if ch == "2":
         raw = input("  Duong dan output > ").strip().strip('"').strip("'")
         output_dir = Path(raw)
     else:
-        output_dir = input_dir / f"output_{fmt.lower()}_{out_size}px"
+        output_dir = input_dir / f"output_{fmt.lower()}_{out_size}px_{fps_label}"
 
     output_dir.mkdir(parents=True, exist_ok=True)
     ok(f"Output: {output_dir}")
@@ -224,11 +260,11 @@ def main():
         sys.stdout.write(f"  [{i}/{len(tgs_files)}] {name}.tgs ... ")
         sys.stdout.flush()
 
-        ok_flag = convert_one(tgs, out_file, out_size, fps, fmt, quality)
+        ok_flag, src_fps, dur_ms = convert_one(tgs, out_file, out_size, target_fps, fmt, quality)
 
         if ok_flag:
             size_str = fmt_size(out_file.stat().st_size)
-            print(clr(f"OK  ({size_str})", GREEN))
+            print(clr(f"OK  ({size_str}, src={src_fps}fps, {dur_ms}ms/frame)", GREEN))
             success += 1
         else:
             print(clr("FAILED", RED))
