@@ -125,3 +125,5 @@ generated/
 output/
 tmp/
 temp/
+ffprobe.exe
+ffmpeg.exe
