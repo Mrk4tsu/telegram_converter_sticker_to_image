@@ -7,15 +7,15 @@ from pathlib import Path
 def check_deps():
     missing = []
     try:
-        import pyrlottie
+        import rlottie_python
     except ImportError:
-        missing.append("pyrlottie")
+        missing.append("rlottie-python")
     try:
         from PIL import Image
     except ImportError:
         missing.append("Pillow")
     if missing:
-        print("\nThieu thu vien:")
+        print("\nThieu thu vien, chay lenh sau de cai:")
         for lib in missing:
             print(f"  pip install {lib}")
         print()
@@ -24,7 +24,7 @@ def check_deps():
 
 check_deps()
 
-from pyrlottie import LottieFile, convSingleLottieFrames
+from rlottie_python import LottieAnimation
 from PIL import Image
 
 RESET  = "\033[0m"
@@ -40,47 +40,27 @@ WHITE  = "\033[97m"
 def clr(text, color):
     return f"{color}{text}{RESET}"
 
-
-def ok(msg):
-    print(clr(f"  [OK] {msg}", GREEN))
-
-
-def err(msg):
-    print(clr(f"  [!!] {msg}", RED))
-
-
-def info(msg):
-    print(clr(f"  --> {msg}", CYAN))
-
-
-def step(n, msg):
-    print(f"\n{clr(f'[{n}]', YELLOW)} {WHITE}{msg}{RESET}")
-
-
-def hr():
-    print(clr("  " + "-" * 50, GRAY))
-
+def ok(msg):    print(clr(f"  [OK] {msg}", GREEN))
+def err(msg):   print(clr(f"  [!!] {msg}", RED))
+def info(msg):  print(clr(f"  --> {msg}", CYAN))
+def step(n, msg): print(f"\n{clr(f'[{n}]', YELLOW)} {WHITE}{msg}{RESET}")
+def hr(): print(clr("  " + "-" * 50, GRAY))
 
 def header():
     print()
     print(clr("=" * 52, CYAN))
-    print(clr("  TGS -> GIF / WebP Converter  (pyrlottie)", BOLD))
+    print(clr("  TGS -> GIF / WebP Converter  (rlottie-python)", BOLD))
     print(clr("=" * 52, CYAN))
 
-
 def fmt_size(n_bytes):
-    if n_bytes < 1024:
-        return f"{n_bytes} B"
-    if n_bytes < 1024 ** 2:
-        return f"{n_bytes / 1024:.1f} KB"
-    return f"{n_bytes / 1024 ** 2:.2f} MB"
-
+    if n_bytes < 1024: return f"{n_bytes} B"
+    if n_bytes < 1024**2: return f"{n_bytes/1024:.1f} KB"
+    return f"{n_bytes/1024**2:.2f} MB"
 
 def prompt(msg, default=""):
     hint = f" [{default}]" if default else ""
     val = input(f"  {msg}{hint} > ").strip()
     return val if val else default
-
 
 def prompt_dir(msg):
     while True:
@@ -90,7 +70,6 @@ def prompt_dir(msg):
             return p
         err(f"Thu muc khong ton tai: {raw}")
 
-
 def prompt_float(msg, default, lo, hi):
     while True:
         raw = prompt(msg, str(default))
@@ -98,10 +77,9 @@ def prompt_float(msg, default, lo, hi):
             val = float(raw)
             if lo <= val <= hi:
                 return val
-            err(f"Vui long nhap so tu {lo} den {hi}")
+            err(f"Nhap so tu {lo} den {hi}")
         except ValueError:
             err("Nhap so hop le")
-
 
 def prompt_int(msg, default, lo, hi):
     while True:
@@ -110,10 +88,9 @@ def prompt_int(msg, default, lo, hi):
             val = int(raw)
             if lo <= val <= hi:
                 return val
-            err(f"Vui long nhap so tu {lo} den {hi}")
+            err(f"Nhap so tu {lo} den {hi}")
         except ValueError:
             err("Nhap so nguyen hop le")
-
 
 def prompt_choice(msg, choices, default):
     opts = "/".join(choices)
@@ -124,27 +101,34 @@ def prompt_choice(msg, choices, default):
         err(f"Chon mot trong: {opts}")
 
 
-def resize_frames(frames, size):
-    return [f.resize(size, Image.LANCZOS) for f in frames]
+def get_frames(tgs_path: Path, width: int, height: int):
+    """Render TGS ra list Pillow RGBA Images."""
+    anim = LottieAnimation.from_tgs(str(tgs_path))
+    frame_count = anim.lottie_animation_get_totalframe()
+    frames = []
+    for i in range(frame_count):
+        frame = anim.render_pillow_frame(i, width=width, height=height)
+        frames.append(frame)
+    anim.lottie_animation_destroy()
+    return frames
 
 
-def save_gif(frames, out_path, fps):
+def save_gif(frames, out_path: Path, fps: int):
     if not frames:
         raise ValueError("Khong co frames")
     duration_ms = int(1000 / fps)
-    gif_frames = [f.convert("RGBA") for f in frames]
-    gif_frames[0].save(
+    frames[0].save(
         out_path,
         format="GIF",
         save_all=True,
-        append_images=gif_frames[1:],
+        append_images=frames[1:],
         loop=0,
         duration=duration_ms,
         disposal=2,
     )
 
 
-def save_webp(frames, out_path, fps, quality=85):
+def save_webp(frames, out_path: Path, fps: int, quality: int = 85):
     if not frames:
         raise ValueError("Khong co frames")
     duration_ms = int(1000 / fps)
@@ -160,33 +144,23 @@ def save_webp(frames, out_path, fps, quality=85):
     )
 
 
-async def convert_one(tgs_path, out_path, size, fps, fmt, quality=85):
+def convert_one(tgs_path: Path, out_path: Path, size: int, fps: int, fmt: str, quality: int = 85):
     try:
-        lottie_file = LottieFile(str(tgs_path))
-        result = await convSingleLottieFrames(lottie_file)
-        frames = result.frames
-
+        frames = get_frames(tgs_path, size, size)
         if not frames:
             return False
-
-        target = (size, size)
-        if frames[0].size != target:
-            frames = resize_frames(frames, target)
-
         if fmt == "GIF":
             save_gif(frames, out_path, fps)
         else:
             save_webp(frames, out_path, fps, quality)
-
         return out_path.exists() and out_path.stat().st_size > 0
-
     except Exception as e:
         err(f"Loi: {e}")
         return False
 
 
-async def main():
-    os.system("")
+def main():
+    os.system("")  # bat ANSI Windows
     header()
 
     step(1, "Thu muc chua file .tgs:")
@@ -250,7 +224,7 @@ async def main():
         sys.stdout.write(f"  [{i}/{len(tgs_files)}] {name}.tgs ... ")
         sys.stdout.flush()
 
-        ok_flag = await convert_one(tgs, out_file, out_size, fps, fmt, quality)
+        ok_flag = convert_one(tgs, out_file, out_size, fps, fmt, quality)
 
         if ok_flag:
             size_str = fmt_size(out_file.stat().st_size)
@@ -265,10 +239,11 @@ async def main():
     print(f"\n  Hoan thanh!  Thanh cong: {success}  |  That bai: {failed}")
     info(f"Output: {output_dir}")
     print()
+    input("  Nhan Enter de thoat...")
 
 
 if __name__ == "__main__":
     try:
-        asyncio.run(main())
+        main()
     except KeyboardInterrupt:
         print("\n\n  Da huy.")
