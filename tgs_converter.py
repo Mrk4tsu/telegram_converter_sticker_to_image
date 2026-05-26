@@ -1,88 +1,74 @@
+"""
+TGS + WebM Sticker Converter v6
+================================
+Ho tro:
+  - .tgs  (Telegram Animated Sticker) -> GIF / WebP
+  - .webm (Telegram Video Sticker)    -> GIF / WebP
+
+Fix v6:
+  - WebM VP9 alpha: buoc giai ma bang libvpx-vp9 (software decoder)
+    moi giu duoc alpha stream an cua VP9 Profile 0 alpha_mode=1
+  - Timing chinh xac: lay PTS tung frame bang ffprobe,
+    tinh duration moi frame tu PTS gap thay vi dung fps uniform
+    -> khong bi drop/duplicate frame, animation khong bi giat
+  - GIF: xu ly alpha dung (disposal=2, transparency=0)
+  - WebP: duration la list per-frame thay vi mot gia tri chung
+
+Yeu cau:
+  pip install rlottie-python pillow
+
+Build thanh exe:
+  1. Dat ffmpeg.exe + ffprobe.exe cung thu muc voi script nay
+  2. pyinstaller --onefile --console ^
+       --add-binary "ffmpeg.exe;." ^
+       --add-binary "ffprobe.exe;." ^
+       tgs_converter.py
+"""
+
 import os
 import sys
+import json
 import subprocess
 import shutil
 from pathlib import Path
 
 
-# ── Tim ffmpeg: uu tien cung thu muc exe, sau do PATH ────────────────────────
-def find_ffmpeg() -> str | None:
-    """
-    Thu tu tim ffmpeg:
-      1. Cung thu muc voi file .exe (khi build PyInstaller --onefile)
-      2. Cung thu muc voi script .py (khi chay truc tiep)
-      3. PATH he thong
-    """
-    # Khi PyInstaller --onefile chay, file duoc giai nen vao thu muc tam _MEIPASS
-    # nhung ban than exe nam o sys.executable
+# ── Tim ffmpeg / ffprobe ──────────────────────────────────────────────────────
+def _find_tool(name: str) -> str | None:
+    exe = name + (".exe" if sys.platform == "win32" else "")
     candidates = []
-
-    # Thu muc cua exe / script
-    exe_dir = Path(sys.executable).parent
-    candidates.append(exe_dir / "ffmpeg.exe")
-    candidates.append(exe_dir / "ffmpeg")
-
-    # Thu muc cua script (khi chay truc tiep bang python)
+    candidates.append(Path(sys.executable).parent / exe)
     if getattr(sys, "frozen", False):
-        # Dang chay tu PyInstaller bundle
-        bundle_dir = Path(sys._MEIPASS)
-        candidates.append(bundle_dir / "ffmpeg.exe")
-        candidates.append(bundle_dir / "ffmpeg")
+        candidates.append(Path(sys._MEIPASS) / exe)
     else:
-        # Dang chay truc tiep
-        script_dir = Path(__file__).parent
-        candidates.append(script_dir / "ffmpeg.exe")
-        candidates.append(script_dir / "ffmpeg")
-
+        candidates.append(Path(__file__).parent / exe)
     for p in candidates:
         if p.exists():
             return str(p)
-
-    # Cuoi cung: tim trong PATH he thong
-    return shutil.which("ffmpeg")
+    return shutil.which(name)
 
 
-def find_ffprobe() -> str | None:
-    """Tim ffprobe tuong tu ffmpeg."""
-    candidates = []
-
-    exe_dir = Path(sys.executable).parent
-    candidates.append(exe_dir / "ffprobe.exe")
-    candidates.append(exe_dir / "ffprobe")
-
-    if getattr(sys, "frozen", False):
-        bundle_dir = Path(sys._MEIPASS)
-        candidates.append(bundle_dir / "ffprobe.exe")
-        candidates.append(bundle_dir / "ffprobe")
-    else:
-        script_dir = Path(__file__).parent
-        candidates.append(script_dir / "ffprobe.exe")
-        candidates.append(script_dir / "ffprobe")
-
-    for p in candidates:
-        if p.exists():
-            return str(p)
-
-    return shutil.which("ffprobe")
+FFMPEG  = _find_tool("ffmpeg")
+FFPROBE = _find_tool("ffprobe")
+HAS_FFMPEG  = FFMPEG  is not None
+HAS_FFPROBE = FFPROBE is not None
 
 
-# ── Check deps ────────────────────────────────────────────────────────────────
+# ── Check pip deps ────────────────────────────────────────────────────────────
 def check_deps():
-    missing_pip = []
+    missing = []
     try:
         import rlottie_python
     except ImportError:
-        missing_pip.append("rlottie-python")
+        missing.append("rlottie-python")
     try:
         from PIL import Image
     except ImportError:
-        missing_pip.append("Pillow")
-
-    if missing_pip:
+        missing.append("Pillow")
+    if missing:
         print("\nThieu thu vien Python:")
-        for lib in missing_pip:
+        for lib in missing:
             print(f"  pip install {lib}")
-        print()
         sys.exit(1)
 
 
@@ -91,11 +77,7 @@ check_deps()
 from rlottie_python import LottieAnimation
 from PIL import Image
 
-# Tim ffmpeg sau khi check deps
-FFMPEG  = find_ffmpeg()
-FFPROBE = find_ffprobe()
-HAS_FFMPEG = FFMPEG is not None
-
+# ── Colors ────────────────────────────────────────────────────────────────────
 RESET   = "\033[0m"
 BOLD    = "\033[1m"
 CYAN    = "\033[96m"
@@ -106,26 +88,25 @@ GRAY    = "\033[90m"
 WHITE   = "\033[97m"
 MAGENTA = "\033[95m"
 
-
-def clr(text, color):   return f"{color}{text}{RESET}"
-def ok(msg):            print(clr(f"  [OK] {msg}", GREEN))
-def err(msg):           print(clr(f"  [!!] {msg}", RED))
-def info(msg):          print(clr(f"  --> {msg}", CYAN))
-def warn(msg):          print(clr(f"  [!]  {msg}", YELLOW))
-def step(n, msg):       print(f"\n{clr(f'[{n}]', YELLOW)} {WHITE}{msg}{RESET}")
-def hr():               print(clr("  " + "-" * 54, GRAY))
+def clr(text, color): return f"{color}{text}{RESET}"
+def ok(msg):          print(clr(f"  [OK] {msg}", GREEN))
+def err(msg):         print(clr(f"  [!!] {msg}", RED))
+def info(msg):        print(clr(f"  --> {msg}", CYAN))
+def warn(msg):        print(clr(f"  [!]  {msg}", YELLOW))
+def step(n, msg):     print(f"\n{clr(f'[{n}]', YELLOW)} {WHITE}{msg}{RESET}")
+def hr():             print(clr("  " + "-" * 54, GRAY))
 
 def header():
     print()
     print(clr("=" * 56, CYAN))
-    print(clr("  TGS + WebM Sticker Converter  v5", BOLD))
+    print(clr("  TGS + WebM Sticker Converter  v6", BOLD))
     print(clr("  .tgs -> GIF/WebP  |  .webm -> GIF/WebP", GRAY))
     print(clr("=" * 56, CYAN))
 
-def fmt_size(n_bytes):
-    if n_bytes < 1024:      return f"{n_bytes} B"
-    if n_bytes < 1024**2:   return f"{n_bytes/1024:.1f} KB"
-    return f"{n_bytes/1024**2:.2f} MB"
+def fmt_size(n):
+    if n < 1024:      return f"{n} B"
+    if n < 1024**2:   return f"{n/1024:.1f} KB"
+    return f"{n/1024**2:.2f} MB"
 
 def prompt(msg, default=""):
     hint = f" [{default}]" if default else ""
@@ -147,9 +128,9 @@ def prompt_float(msg, default, lo, hi):
             val = float(raw)
             if lo <= val <= hi:
                 return val
-            err(f"Nhap so tu {lo} den {hi}")
         except ValueError:
-            err("Nhap so hop le")
+            pass
+        err(f"Nhap so tu {lo} den {hi}")
 
 def prompt_int(msg, default, lo, hi):
     while True:
@@ -158,9 +139,9 @@ def prompt_int(msg, default, lo, hi):
             val = int(raw)
             if lo <= val <= hi:
                 return val
-            err(f"Nhap so tu {lo} den {hi}")
         except ValueError:
-            err("Nhap so nguyen hop le")
+            pass
+        err(f"Nhap so nguyen tu {lo} den {hi}")
 
 def prompt_choice(msg, choices, default):
     opts = "/".join(choices)
@@ -171,70 +152,202 @@ def prompt_choice(msg, choices, default):
         err(f"Chon mot trong: {opts}")
 
 
-# ── Probe WebM ────────────────────────────────────────────────────────────────
-def probe_webm(path: Path):
-    if not FFPROBE:
-        return 512, 512, 30.0, False
+# ════════════════════════════════════════════════════════════════════════════
+#  WEBM UTILITIES
+# ════════════════════════════════════════════════════════════════════════════
+
+def probe_webm(path: Path) -> dict:
+    """
+    Tra ve dict:
+      width, height, fps (float), has_alpha (bool),
+      n_frames (int), durations_ms (list[int])
+
+    Cach tinh duration:
+      - Lay danh sach PTS tung packet bang ffprobe
+      - duration[i] = pts[i+1] - pts[i]
+      - duration cuoi = total_duration - pts[-1]
+    """
+    result = {"width": 512, "height": 512, "fps": 30.0,
+              "has_alpha": False, "n_frames": 0, "durations_ms": []}
+
+    if not HAS_FFPROBE:
+        return result
+
     try:
-        import json
-        result = subprocess.run(
-            [FFPROBE, "-v", "quiet", "-print_format", "json", "-show_streams", str(path)],
-            capture_output=True, text=True
-        )
-        data = json.loads(result.stdout)
+        # Stream info
+        r = subprocess.run([
+            FFPROBE, "-v", "quiet",
+            "-select_streams", "v:0",
+            "-show_streams",
+            "-of", "json",
+            str(path)
+        ], capture_output=True, text=True)
+        data = json.loads(r.stdout)
         s = data["streams"][0]
-        w = s["width"]
-        h = s["height"]
+
+        result["width"]  = s.get("width",  512)
+        result["height"] = s.get("height", 512)
+
         fps_raw = s.get("r_frame_rate", "30/1")
         num, den = fps_raw.split("/")
-        fps = round(int(num) / max(int(den), 1), 2)
-        has_alpha = s.get("tags", {}).get("alpha_mode", "0") == "1"
-        return w, h, fps, has_alpha
-    except Exception:
-        return 512, 512, 30.0, False
+        result["fps"] = round(int(num) / max(int(den), 1), 3)
 
+        # alpha_mode="1" trong Metadata tag -> co alpha stream VP9
+        result["has_alpha"] = s.get("tags", {}).get("alpha_mode", "0") == "1"
 
-# ── Convert WebM -> GIF ───────────────────────────────────────────────────────
-def convert_webm_to_gif(src: Path, dst: Path, size: int) -> bool:
-    palette = dst.with_suffix(".palette.png")
-    try:
-        r1 = subprocess.run([
-            FFMPEG, "-y", "-i", str(src),
-            "-vf", f"scale={size}:{size}:flags=lanczos,palettegen=reserve_transparent=1",
-            str(palette)
-        ], capture_output=True)
-        if r1.returncode != 0:
-            return False
-
+        # Total duration tu format (chinh xac hon stream)
         r2 = subprocess.run([
+            FFPROBE, "-v", "quiet",
+            "-show_entries", "format=duration",
+            "-of", "json",
+            str(path)
+        ], capture_output=True, text=True)
+        total_dur = float(json.loads(r2.stdout)["format"]["duration"])
+
+        # PTS tung frame
+        r3 = subprocess.run([
+            FFPROBE, "-v", "quiet",
+            "-select_streams", "v:0",
+            "-show_entries", "packet=pts_time",
+            "-of", "json",
+            str(path)
+        ], capture_output=True, text=True)
+        packets = json.loads(r3.stdout).get("packets", [])
+        pts_list = [float(p["pts_time"]) for p in packets]
+
+        if not pts_list:
+            return result
+
+        n = len(pts_list)
+        result["n_frames"] = n
+
+        # Duration moi frame tinh tu PTS gap
+        durations = []
+        for i in range(n):
+            nxt = pts_list[i + 1] if i + 1 < n else total_dur
+            ms = max(10, int(round((nxt - pts_list[i]) * 1000)))
+            durations.append(ms)
+        result["durations_ms"] = durations
+
+    except Exception as e:
+        pass  # tra ve gia tri mac dinh
+
+    return result
+
+
+def _extract_frames_webm(src: Path, n_frames: int, size: int, tmp_dir: Path) -> list[Image.Image]:
+    """
+    Extract chinh xac n_frames bang cach chon frame theo index.
+    Dung libvpx-vp9 decoder de giai ma alpha stream VP9.
+    Tra ve list[Image.RGBA].
+    """
+    tmp_dir.mkdir(parents=True, exist_ok=True)
+    frames = []
+
+    for i in range(n_frames):
+        out = tmp_dir / f"f{i:04d}.png"
+        r = subprocess.run([
             FFMPEG, "-y",
+            "-vcodec", "libvpx-vp9",      # software decoder -> giu alpha
             "-i", str(src),
-            "-i", str(palette),
-            "-lavfi", f"scale={size}:{size}:flags=lanczos [x]; [x][1:v] paletteuse=alpha_threshold=128",
-            str(dst)
+            "-vf", (
+                f"select=eq(n\\,{i}),"     # lay dung frame thu i
+                f"scale={size}:{size}:flags=lanczos"
+            ),
+            "-vframes", "1",
+            "-update", "1",               # ghi 1 file thay vi sequence
+            str(out)
         ], capture_output=True)
-        return r2.returncode == 0 and dst.exists() and dst.stat().st_size > 0
-    finally:
-        palette.unlink(missing_ok=True)
+
+        if r.returncode != 0 or not out.exists() or out.stat().st_size == 0:
+            # Frame loi: dung frame truoc do (hoac frame trang)
+            if frames:
+                frames.append(frames[-1].copy())
+            else:
+                frames.append(Image.new("RGBA", (size, size), (0, 0, 0, 0)))
+            continue
+
+        img = Image.open(out).convert("RGBA")
+        frames.append(img)
+
+    return frames
 
 
-# ── Convert WebM -> WebP animated ────────────────────────────────────────────
-def convert_webm_to_webp(src: Path, dst: Path, size: int, quality: int = 85) -> bool:
-    r = subprocess.run([
-        FFMPEG, "-y", "-i", str(src),
-        "-vf", f"scale={size}:{size}:flags=lanczos",
-        "-vcodec", "libwebp",
-        "-lossless", "0",
-        "-quality", str(quality),
-        "-loop", "0",
-        "-preset", "default",
-        "-an",
-        str(dst)
-    ], capture_output=True)
-    return r.returncode == 0 and dst.exists() and dst.stat().st_size > 0
+def convert_webm_to_webp(src: Path, dst: Path, size: int, quality: int = 85) -> tuple[bool, dict]:
+    """
+    Convert WebM -> animated WebP voi alpha chinh xac va timing dung.
+    Tra ve (success: bool, info: dict)
+    """
+    probe = probe_webm(src)
+    if probe["n_frames"] == 0:
+        return False, probe
+
+    import tempfile
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_dir = Path(tmp)
+        frames = _extract_frames_webm(src, probe["n_frames"], size, tmp_dir)
+
+    if not frames:
+        return False, probe
+
+    try:
+        frames[0].save(
+            dst,
+            format="WEBP",
+            save_all=True,
+            append_images=frames[1:],
+            loop=0,
+            duration=probe["durations_ms"],  # list per-frame duration
+            quality=quality,
+            method=6,
+        )
+        ok_flag = dst.exists() and dst.stat().st_size > 0
+    except Exception as e:
+        ok_flag = False
+
+    return ok_flag, probe
 
 
-# ── Convert TGS ──────────────────────────────────────────────────────────────
+def convert_webm_to_gif(src: Path, dst: Path, size: int) -> tuple[bool, dict]:
+    """
+    Convert WebM -> animated GIF voi alpha va timing dung.
+    GIF chi ho tro 1-bit transparency -> dung disposal=2 + transparency=0.
+    """
+    probe = probe_webm(src)
+    if probe["n_frames"] == 0:
+        return False, probe
+
+    import tempfile
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_dir = Path(tmp)
+        frames = _extract_frames_webm(src, probe["n_frames"], size, tmp_dir)
+
+    if not frames:
+        return False, probe
+
+    try:
+        frames[0].save(
+            dst,
+            format="GIF",
+            save_all=True,
+            append_images=frames[1:],
+            loop=0,
+            duration=probe["durations_ms"],
+            disposal=2,      # xoa ve nen truoc khi ve frame tiep theo
+            transparency=0,  # palette index 0 = trong suot
+            optimize=False,
+        )
+        ok_flag = dst.exists() and dst.stat().st_size > 0
+    except Exception as e:
+        ok_flag = False
+
+    return ok_flag, probe
+
+
+# ════════════════════════════════════════════════════════════════════════════
+#  TGS UTILITIES  (giu nguyen tu v5)
+# ════════════════════════════════════════════════════════════════════════════
+
 def get_tgs_frames(tgs_path: Path, width: int, height: int, target_fps: int):
     anim = LottieAnimation.from_tgs(str(tgs_path))
     total_frames = anim.lottie_animation_get_totalframe()
@@ -284,20 +397,27 @@ def convert_tgs(tgs_path: Path, out_path: Path, size: int, target_fps: int, fmt:
     return out_path.exists() and out_path.stat().st_size > 0, src_fps, duration_ms
 
 
-# ── Main ─────────────────────────────────────────────────────────────────────
+# ════════════════════════════════════════════════════════════════════════════
+#  MAIN
+# ════════════════════════════════════════════════════════════════════════════
+
 def main():
     os.system("")
     header()
 
-    # Hien thi trang thai ffmpeg
     print()
     if HAS_FFMPEG:
-        ok(f"ffmpeg: {FFMPEG}")
+        ok(f"ffmpeg : {FFMPEG}")
     else:
         warn("ffmpeg khong tim thay!")
         warn("Dat ffmpeg.exe cung thu muc voi file exe nay.")
         warn("Download: https://github.com/BtbN/FFmpeg-Builds/releases")
         warn("File .webm se bi bo qua.")
+
+    if HAS_FFPROBE:
+        ok(f"ffprobe: {FFPROBE}")
+    else:
+        warn("ffprobe khong tim thay! Timing co the khong chinh xac.")
 
     # [1] Thu muc input
     step(1, "Thu muc chua file sticker:")
@@ -318,8 +438,8 @@ def main():
 
     # [2] Format output
     step(2, "Format output:")
-    print("     [1] GIF  - pho bien, khong alpha")
-    print("     [2] WebP - giu alpha, chat luong tot (khuyen nghi)")
+    print("     [1] GIF  - pho bien, ho tro 1-bit alpha")
+    print("     [2] WebP - giu alpha day du, chat luong tot (khuyen nghi)")
     fmt_choice = prompt_choice("Chon", ["1", "2"], "2")
     fmt = "GIF" if fmt_choice == "1" else "WEBP"
     ok(f"Format: {fmt}")
@@ -327,13 +447,12 @@ def main():
     # [3] % resize
     step(3, "Resize theo % (100 = 512x512 goc, 50 = 256x256):")
     pct = prompt_float("% kich thuoc", 100.0, 1.0, 500.0)
-    base_size = 512
-    out_size = max(8, int(round(base_size * pct / 100)))
+    out_size = max(8, int(round(512 * pct / 100)))
     if out_size % 2 != 0:
         out_size += 1
     ok(f"Kich thuoc output: {out_size}x{out_size} px")
 
-    # [4] FPS (chi cho TGS)
+    # [4] FPS (chi TGS)
     target_fps = 0
     if tgs_files:
         step(4, "FPS cho TGS (0 = giu nguyen FPS goc):")
@@ -349,7 +468,7 @@ def main():
         quality = prompt_int("Quality", 85, 1, 100)
         ok(f"Quality: {quality}")
     else:
-        step(5, "(Bo qua quality - khong ap dung cho GIF)")
+        step(5, "(Bo qua quality - GIF khong ap dung)")
 
     # [6] Output dir
     step(6, "Thu muc output:")
@@ -375,10 +494,10 @@ def main():
     total = len(all_files)
 
     for i, src in enumerate(all_files, 1):
-        is_tgs  = src.suffix.lower() == ".tgs"
-        name    = src.stem
-        tag     = clr("[TGS] ", CYAN) if is_tgs else clr("[WebM]", MAGENTA)
-        ext     = fmt.lower()
+        is_tgs = src.suffix.lower() == ".tgs"
+        name   = src.stem
+        tag    = clr("[TGS] ", CYAN) if is_tgs else clr("[WebM]", MAGENTA)
+        ext    = fmt.lower()
         out_file = output_dir / f"{name}.{ext}"
 
         sys.stdout.write(f"  [{i}/{total}] {tag} {name} ... ")
@@ -392,42 +511,50 @@ def main():
                 ok_flag, src_fps, dur_ms = convert_tgs(
                     src, out_file, out_size, target_fps, fmt, quality
                 )
-                detail = f"src={src_fps}fps {dur_ms}ms/frame"
+                detail = f"src={src_fps}fps  frame={dur_ms}ms"
+
             else:
-                # WebM
                 if not HAS_FFMPEG:
                     print(clr("SKIP (khong co ffmpeg)", YELLOW))
                     skipped += 1
                     continue
 
                 if fmt == "GIF":
-                    ok_flag = convert_webm_to_gif(src, out_file, out_size)
+                    ok_flag, probe = convert_webm_to_gif(src, out_file, out_size)
                 else:
-                    ok_flag = convert_webm_to_webp(src, out_file, out_size, quality)
+                    ok_flag, probe = convert_webm_to_webp(src, out_file, out_size, quality)
 
-                if ok_flag:
-                    w, h, fps, alpha = probe_webm(src)
-                    detail = f"src={w}x{h} {fps}fps alpha={'yes' if alpha else 'no'}"
+                if ok_flag and probe["n_frames"] > 0:
+                    dur_list = probe["durations_ms"]
+                    alpha_str = "alpha=yes" if probe["has_alpha"] else "alpha=no"
+                    detail = (
+                        f"src={probe['width']}x{probe['height']} "
+                        f"{probe['fps']}fps  "
+                        f"frames={probe['n_frames']}  "
+                        f"{alpha_str}  "
+                        f"timing={dur_list}"
+                    )
 
         except Exception as e:
-            err(f"Loi: {e}")
+            detail = str(e)
             ok_flag = False
 
         if ok_flag:
             size_str = fmt_size(out_file.stat().st_size)
-            extra = f", {detail}" if detail else ""
-            print(clr(f"OK  ({size_str}{extra})", GREEN))
+            extra = f"  ({detail})" if detail else ""
+            print(clr(f"OK  [{size_str}]{extra}", GREEN))
             success += 1
         else:
-            print(clr("FAILED", RED))
+            reason = f"  ({detail})" if detail else ""
+            print(clr(f"FAILED{reason}", RED))
             failed += 1
 
     # Ket qua
     print()
     hr()
     parts = [f"Thanh cong: {clr(str(success), GREEN)}"]
-    if failed:   parts.append(f"That bai: {clr(str(failed), RED)}")
-    if skipped:  parts.append(f"Bo qua: {clr(str(skipped), YELLOW)}")
+    if failed:  parts.append(f"That bai: {clr(str(failed), RED)}")
+    if skipped: parts.append(f"Bo qua: {clr(str(skipped), YELLOW)}")
     print(f"\n  Hoan thanh!  " + "  |  ".join(parts))
     info(f"Output: {output_dir}")
     print()
